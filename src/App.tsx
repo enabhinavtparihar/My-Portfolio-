@@ -12,7 +12,7 @@ import {
   Cpu,
   Database,
   Sparkles,
-  User,
+  User as UserIcon,
   Code,
   Laptop,
   Server,
@@ -36,8 +36,33 @@ import {
   Camera,
   Upload,
   Volume2,
-  VolumeX
+  VolumeX,
+  Folder,
+  FolderPlus,
+  Search,
+  Trash2,
+  LogOut,
+  Eye,
+  File,
+  FileSpreadsheet,
+  HardDrive,
+  Plus,
+  ArrowLeft,
+  Lock,
+  Cloud
 } from "lucide-react";
+
+import { initializeApp } from "firebase/app";
+import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from "firebase/auth";
+import firebaseConfig from "../firebase-applet-config.json";
+
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const googleProvider = new GoogleAuthProvider();
+googleProvider.addScope("https://www.googleapis.com/auth/drive");
+googleProvider.addScope("https://www.googleapis.com/auth/drive.file");
+googleProvider.addScope("https://www.googleapis.com/auth/drive.readonly");
+googleProvider.addScope("https://www.googleapis.com/auth/drive.metadata.readonly");
 
 // ==========================================
 // 1. DATA MODELS & INLINE DATASETS
@@ -448,6 +473,7 @@ function Navbar({ activeSection }: NavbarProps) {
     { name: "Awards", href: "#awards" },
     { name: "Education", href: "#education" },
     { name: "Resume", href: "#resume" },
+    { name: "Google Drive", href: "#drive" },
     { name: "Contact", href: "#contact" }
   ];
 
@@ -741,7 +767,7 @@ function AboutSection() {
           {/* Right Block: Narrative Overview */}
           <div className="lg:col-span-8 flex flex-col justify-center text-left" id="about-narrative-block">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary-indigo/10 border border-primary-indigo/20 text-accent-sky font-mono text-xs mb-4 w-fit">
-              <User className="w-3.5 h-3.5" />
+              <UserIcon className="w-3.5 h-3.5" />
               <span>PROFILE OVERVIEW</span>
             </div>
             
@@ -1699,6 +1725,755 @@ function ResumeSection() {
   );
 }
 
+// Google Drive Section Component
+function GoogleDriveSection() {
+  const [user, setUser] = useState<User | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [files, setFiles] = useState<any[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  // Folder navigation history: starts at 'root'
+  const [folderHistory, setFolderHistory] = useState<Array<{ id: string; name: string }>>([
+    { id: "root", name: "My Drive" }
+  ]);
+  const currentFolder = folderHistory[folderHistory.length - 1];
+
+  // Search, filter, and view options
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filterType, setFilterType] = useState<"all" | "folders" | "documents" | "spreadsheets" | "images" | "pdfs">("all");
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+
+  // Create folder states
+  const [showCreateFolder, setShowCreateFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+
+  // Upload file states
+  const [dragActive, setDragActive] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+
+  // Delete file modal states
+  const [fileToDelete, setFileToDelete] = useState<any | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  useEffect(() => {
+    // Listen for authentication changes
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+      } else {
+        setUser(null);
+        setAccessToken(null);
+        setFiles([]);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleConnect = async () => {
+    setIsLoggingIn(true);
+    setError(null);
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      if (credential && credential.accessToken) {
+        setAccessToken(credential.accessToken);
+        setUser(result.user);
+        fetchFiles(credential.accessToken, currentFolder.id);
+      } else {
+        throw new Error("Could not retrieve Google Drive access token. Please try again.");
+      }
+    } catch (err: any) {
+      console.error("Auth error:", err);
+      setError(err.message || "Failed to sign in and authorize Google Drive.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      await auth.signOut();
+      setAccessToken(null);
+      setUser(null);
+      setFiles([]);
+      setFolderHistory([{ id: "root", name: "My Drive" }]);
+    } catch (err: any) {
+      console.error("Sign out error:", err);
+    }
+  };
+
+  const fetchFiles = async (token: string, folderId: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      // Build search query: files in current folder that are not trashed
+      const q = `'${folderId}' in parents and trashed = false`;
+      const fields = "files(id,name,mimeType,size,modifiedTime,webViewLink,iconLink)";
+      const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${fields}&pageSize=100&orderBy=folder,name`;
+      
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (res.status === 401) {
+        handleDisconnect();
+        throw new Error("Session expired. Please reconnect your Google Drive.");
+      }
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error?.message || `Google Drive API error (${res.status})`);
+      }
+
+      const data = await res.json();
+      setFiles(data.files || []);
+    } catch (err: any) {
+      console.error("Fetch error:", err);
+      setError(err.message || "Failed to load files from Google Drive.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (accessToken && user) {
+      fetchFiles(accessToken, currentFolder.id);
+    }
+  }, [currentFolder.id, accessToken]);
+
+  const handleCreateFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFolderName.trim() || !accessToken) return;
+
+    setIsCreatingFolder(true);
+    setError(null);
+    try {
+      const metadata = {
+        name: newFolderName.trim(),
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [currentFolder.id]
+      };
+
+      const res = await fetch("https://www.googleapis.com/drive/v3/files", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(metadata)
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to create folder in Google Drive.");
+      }
+
+      setNewFolderName("");
+      setShowCreateFolder(false);
+      fetchFiles(accessToken, currentFolder.id);
+    } catch (err: any) {
+      console.error("Create folder error:", err);
+      setError(err.message || "Failed to create folder.");
+    } finally {
+      setIsCreatingFolder(false);
+    }
+  };
+
+  const handleFileUpload = async (file: File) => {
+    if (!accessToken) return;
+
+    setIsUploading(true);
+    setUploadStatus(`Uploading "${file.name}"...`);
+    setError(null);
+    try {
+      const metadata = {
+        name: file.name,
+        parents: [currentFolder.id]
+      };
+
+      const formData = new FormData();
+      formData.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+      formData.append("file", file);
+
+      const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        },
+        body: formData
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to upload file to Google Drive.");
+      }
+
+      setUploadStatus("Upload complete!");
+      setTimeout(() => setUploadStatus(null), 3000);
+      fetchFiles(accessToken, currentFolder.id);
+    } catch (err: any) {
+      console.error("Upload error:", err);
+      setError(err.message || "Failed to upload file.");
+      setUploadStatus(null);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileUpload(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      handleFileUpload(e.target.files[0]);
+    }
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!fileToDelete || !accessToken) return;
+
+    setIsDeleting(true);
+    setError(null);
+    try {
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileToDelete.id}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
+
+      if (!res.ok) {
+        throw new Error(`Failed to delete file. Code: ${res.status}`);
+      }
+
+      setFileToDelete(null);
+      fetchFiles(accessToken, currentFolder.id);
+    } catch (err: any) {
+      console.error("Delete error:", err);
+      setError(err.message || "Failed to delete file.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleItemClick = (file: any) => {
+    if (file.mimeType === "application/vnd.google-apps.folder") {
+      setFolderHistory((prev) => [...prev, { id: file.id, name: file.name }]);
+    }
+  };
+
+  const handleBreadcrumbClick = (index: number) => {
+    setFolderHistory((prev) => prev.slice(0, index + 1));
+  };
+
+  const formatBytes = (bytes: string | number | undefined) => {
+    if (!bytes) return "—";
+    const num = typeof bytes === "string" ? parseInt(bytes, 10) : bytes;
+    if (isNaN(num)) return "—";
+    if (num === 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(num) / Math.log(k));
+    return parseFloat((num / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+  };
+
+  const formatDate = (dateStr: string) => {
+    if (!dateStr) return "—";
+    const d = new Date(dateStr);
+    return d.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  };
+
+  const getFileIcon = (mimeType: string) => {
+    if (mimeType === "application/vnd.google-apps.folder") {
+      return <Folder className="w-8 h-8 text-indigo-400 group-hover:scale-110 transition-transform" />;
+    }
+    if (mimeType.includes("document") || mimeType === "application/vnd.google-apps.document") {
+      return <FileText className="w-8 h-8 text-sky-400 group-hover:scale-110 transition-transform" />;
+    }
+    if (mimeType.includes("sheet") || mimeType === "application/vnd.google-apps.spreadsheet") {
+      return <FileSpreadsheet className="w-8 h-8 text-emerald-400 group-hover:scale-110 transition-transform" />;
+    }
+    if (mimeType.includes("image/")) {
+      return <Camera className="w-8 h-8 text-pink-400 group-hover:scale-110 transition-transform" />;
+    }
+    if (mimeType === "application/pdf") {
+      return <File className="w-8 h-8 text-rose-400 group-hover:scale-110 transition-transform" />;
+    }
+    return <File className="w-8 h-8 text-gray-400 group-hover:scale-110 transition-transform" />;
+  };
+
+  const filteredFiles = files.filter((file) => {
+    if (searchQuery && !file.name.toLowerCase().includes(searchQuery.toLowerCase())) {
+      return false;
+    }
+
+    if (filterType === "folders") {
+      return file.mimeType === "application/vnd.google-apps.folder";
+    }
+    if (filterType === "documents") {
+      return file.mimeType.includes("document") || file.mimeType === "application/vnd.google-apps.document";
+    }
+    if (filterType === "spreadsheets") {
+      return file.mimeType.includes("sheet") || file.mimeType === "application/vnd.google-apps.spreadsheet";
+    }
+    if (filterType === "images") {
+      return file.mimeType.includes("image/");
+    }
+    if (filterType === "pdfs") {
+      return file.mimeType === "application/pdf";
+    }
+
+    return true;
+  });
+
+  return (
+    <section id="drive" className="py-24 relative overflow-hidden bg-dark-bg border-t border-white/5">
+      <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-[#030611] via-transparent to-[#030611] pointer-events-none z-10" />
+      
+      <div className="max-w-6xl mx-auto px-6 relative z-20">
+        {/* Section Header */}
+        <div className="text-center max-w-3xl mx-auto mb-16">
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-mono tracking-wider uppercase mb-5">
+            <Cloud className="w-3.5 h-3.5 animate-pulse" />
+            <span>Interactive Sandbox</span>
+          </div>
+          <h2 className="text-3xl sm:text-4xl md:text-5xl font-heading font-extrabold tracking-tight text-white mb-4">
+            Google Drive <span className="text-gradient">Explorer</span>
+          </h2>
+          <p className="text-gray-400 text-sm sm:text-base leading-relaxed">
+            A premium full-stack storage showcase integrated with Google Workspace. Securely authenticate your Google account to manage, upload, search, and preview Google Drive files client-side.
+          </p>
+        </div>
+
+        {/* Authentication Gate */}
+        {!accessToken ? (
+          <div className="max-w-xl mx-auto glass-card p-8 rounded-2xl border border-white/5 text-center relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full blur-2xl pointer-events-none" />
+            <div className="w-16 h-16 mx-auto mb-6 rounded-full bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
+              <Lock className="w-8 h-8 text-indigo-400" />
+            </div>
+            
+            <h3 className="text-xl font-heading font-bold text-white mb-3">Connect your Google Account</h3>
+            <p className="text-gray-400 text-sm mb-8 leading-relaxed">
+              This interactive sandbox uses secure Google OAuth protocol to communicate directly with your Google Drive API in real-time. No personal credentials are saved or shared.
+            </p>
+
+            {error && (
+              <div className="mb-6 p-4 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs text-left font-mono">
+                {error}
+              </div>
+            )}
+
+            <button
+              onClick={handleConnect}
+              disabled={isLoggingIn}
+              className="gsi-material-button mx-auto hover:scale-[1.02] transition-transform duration-300 shadow-lg shadow-indigo-500/10"
+              style={{ display: "inline-flex", cursor: "pointer" }}
+            >
+              <div className="gsi-material-button-state"></div>
+              <div className="gsi-material-button-content-wrapper">
+                <div className="gsi-material-button-icon">
+                  <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" style={{ display: "block" }}>
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                    <path fill="none" d="M0 0h48v48H0z"></path>
+                  </svg>
+                </div>
+                <span className="gsi-material-button-contents font-heading font-semibold text-sm">
+                  {isLoggingIn ? "Connecting..." : "Sign in with Google"}
+                </span>
+              </div>
+            </button>
+          </div>
+        ) : (
+          <div className="glass-card rounded-2xl border border-white/5 p-6 sm:p-8 relative">
+            
+            {/* Top User & Controls Bar */}
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-white/5 pb-6 mb-6">
+              <div className="flex items-center gap-3">
+                {user?.photoURL ? (
+                  <img src={user.photoURL} alt={user.displayName || "User"} className="w-10 h-10 rounded-full border border-white/10" />
+                ) : (
+                  <div className="w-10 h-10 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center font-heading font-bold text-indigo-300">
+                    {user?.displayName?.charAt(0) || "U"}
+                  </div>
+                )}
+                <div>
+                  <h4 className="font-heading font-semibold text-white text-sm sm:text-base">{user?.displayName || "Google Cloud User"}</h4>
+                  <p className="text-gray-400 text-xs font-mono">{user?.email}</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2.5 w-full sm:w-auto">
+                <button
+                  onClick={() => setShowCreateFolder(true)}
+                  className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 transition-colors text-white text-xs font-semibold"
+                >
+                  <FolderPlus className="w-4 h-4" />
+                  <span>New Folder</span>
+                </button>
+                <button
+                  onClick={() => fetchFiles(accessToken, currentFolder.id)}
+                  disabled={isLoading}
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 transition-colors text-gray-400 hover:text-white"
+                  title="Refresh Drive"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isLoading ? "animate-spin text-indigo-400" : ""}`} />
+                </button>
+                <button
+                  onClick={handleDisconnect}
+                  className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 transition-colors text-rose-400 hover:text-rose-300"
+                  title="Disconnect"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Folder Breadcrumb Navigation */}
+            <div className="flex flex-wrap items-center gap-1 text-xs sm:text-sm font-sans text-gray-400 mb-6 bg-white/5 px-4 py-2.5 rounded-xl border border-white/5 overflow-x-auto">
+              <HardDrive className="w-4 h-4 text-indigo-400 mr-1 shrink-0" />
+              {folderHistory.map((folder, index) => (
+                <React.Fragment key={folder.id}>
+                  {index > 0 && <span className="text-gray-600 font-mono">/</span>}
+                  <button
+                    onClick={() => handleBreadcrumbClick(index)}
+                    disabled={index === folderHistory.length - 1}
+                    className={`hover:text-white transition-colors py-0.5 px-1.5 rounded-md ${
+                      index === folderHistory.length - 1
+                        ? "text-indigo-300 font-semibold cursor-default"
+                        : "text-gray-400 font-medium hover:bg-white/5"
+                    }`}
+                  >
+                    {folder.name}
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
+
+            {/* Error and Info Notices */}
+            {error && (
+              <div className="mb-6 p-4 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs flex items-center justify-between">
+                <span>{error}</span>
+                <button onClick={() => setError(null)} className="text-rose-400 hover:text-rose-300 font-bold ml-2">✕</button>
+              </div>
+            )}
+
+            {uploadStatus && (
+              <div className="mb-6 p-4 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-mono animate-pulse flex items-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>{uploadStatus}</span>
+              </div>
+            )}
+
+            {/* Search & Layout Filters Row */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 mb-6">
+              {/* Search Bar */}
+              <div className="md:col-span-6 relative">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Search files and folders..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 rounded-xl bg-white/5 border border-white/5 text-white text-xs sm:text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 focus:bg-white/10 transition-all font-sans"
+                />
+              </div>
+
+              {/* View Layout Controls (Grid / List) */}
+              <div className="md:col-span-6 flex justify-end items-center gap-2.5">
+                <div className="flex rounded-xl bg-white/5 border border-white/5 p-1">
+                  <button
+                    onClick={() => setViewMode("grid")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                      viewMode === "grid" ? "bg-indigo-500 text-white shadow" : "text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Grid
+                  </button>
+                  <button
+                    onClick={() => setViewMode("list")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                      viewMode === "list" ? "bg-indigo-500 text-white shadow" : "text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    List
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Category Filter Tabs */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-3 mb-6 border-b border-white/5">
+              {(["all", "folders", "documents", "spreadsheets", "images", "pdfs"] as const).map((type) => (
+                <button
+                  key={type}
+                  onClick={() => setFilterType(type)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-medium font-heading transition-colors uppercase tracking-wider shrink-0 border ${
+                    filterType === type
+                      ? "bg-indigo-500/15 border-indigo-500/30 text-indigo-300"
+                      : "bg-transparent border-transparent text-gray-500 hover:text-gray-300 hover:bg-white/5"
+                  }`}
+                >
+                  {type}
+                </button>
+              ))}
+            </div>
+
+            {/* Drag & Drop Upload Zone */}
+            <div
+              onDragEnter={handleDrag}
+              onDragOver={handleDrag}
+              onDragLeave={handleDrag}
+              onDrop={handleDrop}
+              className={`border-2 border-dashed rounded-2xl p-6 mb-8 text-center transition-all ${
+                dragActive
+                  ? "border-indigo-500 bg-indigo-500/10 scale-[1.01]"
+                  : "border-white/10 bg-white/5 hover:border-indigo-500/40 hover:bg-white/10"
+              }`}
+            >
+              <Upload className="w-8 h-8 text-indigo-400 mx-auto mb-3 animate-bounce" />
+              <p className="text-gray-300 text-xs sm:text-sm font-semibold mb-1">
+                Drag and drop your file here, or{" "}
+                <label className="text-indigo-400 hover:underline cursor-pointer">
+                  browse files
+                  <input type="file" onChange={handleFileInput} className="hidden" />
+                </label>
+              </p>
+              <p className="text-gray-500 text-[10px] sm:text-xs font-mono">
+                Directly uploads to "{currentFolder.name}" in Google Drive
+              </p>
+            </div>
+
+            {/* Files Explorer Rendering */}
+            {isLoading ? (
+              <div className="py-20 text-center flex flex-col items-center justify-center space-y-3">
+                <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin" />
+                <span className="text-gray-400 text-xs font-mono tracking-widest uppercase">Fetching Drive Index...</span>
+              </div>
+            ) : filteredFiles.length === 0 ? (
+              <div className="py-16 text-center">
+                <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center text-gray-400">
+                  <HardDrive className="w-6 h-6 text-gray-500" />
+                </div>
+                <h5 className="text-gray-300 font-heading font-semibold text-sm mb-1">No files found</h5>
+                <p className="text-gray-500 text-xs">This directory is empty or no files match your active filters.</p>
+              </div>
+            ) : viewMode === "grid" ? (
+              /* Grid Layout */
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {filteredFiles.map((file) => (
+                  <div
+                    key={file.id}
+                    className="group glass-card p-4 rounded-xl border border-white/5 hover:border-indigo-500/30 hover:shadow-lg hover:shadow-indigo-500/5 transition-all flex flex-col justify-between h-40 relative text-left"
+                  >
+                    <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 bg-dark-bg/80 backdrop-blur-md p-1 rounded-lg border border-white/10">
+                      {file.webViewLink && (
+                        <a
+                          href={file.webViewLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1 rounded bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                          title="Open Link"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                      <button
+                        onClick={() => setFileToDelete(file)}
+                        className="p-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 transition-colors"
+                        title="Delete File"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="cursor-pointer flex-1" onClick={() => handleItemClick(file)}>
+                      <div className="mb-3.5">{getFileIcon(file.mimeType)}</div>
+                      <h5 className="text-white text-xs sm:text-sm font-semibold truncate leading-tight mb-1" title={file.name}>
+                        {file.name}
+                      </h5>
+                    </div>
+
+                    <div className="flex justify-between items-center text-[10px] font-mono text-gray-500 border-t border-white/5 pt-2">
+                      <span>{formatBytes(file.size)}</span>
+                      <span>{formatDate(file.modifiedTime).split(",")[0]}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              /* List Layout */
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse min-w-[600px] text-xs sm:text-sm">
+                  <thead>
+                    <tr className="border-b border-white/5 text-gray-500 font-heading uppercase tracking-wider text-[10px]">
+                      <th className="py-3 px-4">Name</th>
+                      <th className="py-3 px-4">Modified</th>
+                      <th className="py-3 px-4">Size</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {filteredFiles.map((file) => (
+                      <tr
+                        key={file.id}
+                        className="hover:bg-white/5 transition-colors group cursor-pointer"
+                      >
+                        <td className="py-3 px-4 flex items-center gap-3 font-semibold text-white" onClick={() => handleItemClick(file)}>
+                          <div className="shrink-0">{getFileIcon(file.mimeType)}</div>
+                          <span className="truncate max-w-[280px]">{file.name}</span>
+                        </td>
+                        <td className="py-3 px-4 text-gray-400 font-mono text-xs" onClick={() => handleItemClick(file)}>
+                          {formatDate(file.modifiedTime)}
+                        </td>
+                        <td className="py-3 px-4 text-gray-400 font-mono text-xs" onClick={() => handleItemClick(file)}>
+                          {file.mimeType === "application/vnd.google-apps.folder" ? "—" : formatBytes(file.size)}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="inline-flex items-center gap-2">
+                            {file.webViewLink && (
+                              <a
+                                href={file.webViewLink}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                                title="Open Link"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </a>
+                            )}
+                            <button
+                              onClick={() => setFileToDelete(file)}
+                              className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 transition-colors"
+                              title="Delete File"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* New Folder Modal Dialog */}
+      {showCreateFolder && (
+        <div className="fixed inset-0 bg-dark-bg/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="glass-card max-w-md w-full rounded-2xl border border-white/10 p-6 shadow-2xl relative text-left">
+            <button
+              onClick={() => setShowCreateFolder(false)}
+              className="absolute top-4 right-4 text-gray-500 hover:text-white transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            
+            <h4 className="font-heading font-bold text-white text-lg mb-4">Create New Folder</h4>
+            <form onSubmit={handleCreateFolder} className="space-y-4">
+              <div>
+                <label className="block text-gray-400 text-xs font-mono uppercase tracking-wider mb-1.5">Folder Name</label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  placeholder="e.g. Portfolio_Assets"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/5 text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all font-sans"
+                />
+              </div>
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateFolder(false)}
+                  className="flex-1 px-4 py-2.5 rounded-xl border border-white/10 text-gray-400 hover:text-white transition-colors text-xs font-semibold text-center"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCreatingFolder || !newFolderName.trim()}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-600 transition-colors text-white text-xs font-semibold text-center"
+                >
+                  {isCreatingFolder ? "Creating..." : "Create Folder"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MANDATORY SECURE DELETE CONFIRMATION MODAL */}
+      {fileToDelete && (
+        <div className="fixed inset-0 bg-dark-bg/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="glass-card max-w-md w-full rounded-2xl border border-rose-500/20 p-6 shadow-2xl relative text-left animate-fade-in">
+            <div className="w-12 h-12 rounded-full bg-rose-500/10 border border-rose-500/30 flex items-center justify-center mb-4">
+              <Trash2 className="w-6 h-6 text-rose-400" />
+            </div>
+
+            <h4 className="font-heading font-extrabold text-white text-lg mb-2">Delete File Permanently?</h4>
+            <p className="text-gray-400 text-xs sm:text-sm leading-relaxed mb-6">
+              Are you sure you want to delete <span className="text-rose-400 font-semibold font-mono">"{fileToDelete.name}"</span>? This action is permanent and cannot be undone.
+            </p>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setFileToDelete(null)}
+                disabled={isDeleting}
+                className="flex-1 px-4 py-2.5 rounded-xl border border-white/10 text-gray-400 hover:text-white transition-colors text-xs font-semibold text-center"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                disabled={isDeleting}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-600 transition-colors text-white text-xs font-semibold text-center shadow-lg shadow-rose-500/20"
+              >
+                {isDeleting ? "Deleting..." : "Delete File"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ContactSection Component
 function ContactSection() {
   const [formData, setFormData] = useState({
@@ -2080,6 +2855,7 @@ export default function App() {
         <AwardsSection />
         <EducationSection />
         <ResumeSection />
+        <GoogleDriveSection />
         <ContactSection />
       </main>
 
