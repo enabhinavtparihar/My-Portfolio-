@@ -1,5 +1,5 @@
 <div align="center">
-#My Personal Portfolio
+My Personal Portfolio
 </div>
 
 # Run and deploy 
